@@ -98,6 +98,24 @@ jobs:
           tar xf "v${ZLIB_VERSION}.tar.gz"
           tar xf "pcre2-${PCRE2_VERSION}.tar.gz"
 
+          # GitHub 源码归档解压根目录为 "<repo>-<tag>"（如 pcre2-pcre2-10.49、
+          # zlib-v1.3.1），与 nginx configure 期望的目录名不一致，统一归一化
+          fixdir() {
+            local root
+            root=$(tar tzf "$1" | head -n1 | cut -d/ -f1)
+            if [ "$root" != "$2" ]; then mv "$root" "$2"; fi
+          }
+          fixdir "v${ZLIB_VERSION}.tar.gz" "zlib-${ZLIB_VERSION}"
+          fixdir "pcre2-${PCRE2_VERSION}.tar.gz" "pcre2-${PCRE2_VERSION}"
+
+          # 编译前置校验：任一目录缺失立即失败，避免 make 阶段才报 cd 错误
+          test -d "nginx-${NGINX_VERSION}"
+          test -d "openssl-${OPENSSL_VERSION}"
+          test -d "zlib-${ZLIB_VERSION}"
+          test -d "pcre2-${PCRE2_VERSION}"
+          test -f "ngx_brotli/config"
+          test -d "ngx_brotli/brotli"
+
       - name: 编译（静态链接）
         run: |
           set -euo pipefail
