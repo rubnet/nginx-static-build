@@ -248,11 +248,22 @@ jobs:
           cd "$BUILD_DIR"
           cp "nginx-${NGINX_VERSION}/objs/nginx" nginx
           cp "nginx-${NGINX_VERSION}/BUILD-INFO.txt" .
-          cp ngx_brotli/brotli/LICENSE BROTLI-LICENSE 2>/dev/null || true
 
           PKG="nginx-${NGINX_VERSION}-openssl-${OPENSSL_VERSION}-brotli-static-x86_64"
-          tar -czf "$GITHUB_WORKSPACE/${DIST_DIR}/${PKG}.tar.gz" \
-            nginx BUILD-INFO.txt BROTLI-LICENSE
+
+          # LICENSE 实际位于 brotli 子模块根目录 deps/brotli/LICENSE，
+          # 原写法 ngx_brotli/brotli/LICENSE 少了 deps/ 层级。
+          # 只有复制成功才把文件加入归档列表，否则 tar 会因目标不存在报
+          # "Cannot stat: No such file or directory" 并以状态 2 退出。
+          FILES=(nginx BUILD-INFO.txt)
+          if [ -f ngx_brotli/deps/brotli/LICENSE ]; then
+            cp ngx_brotli/deps/brotli/LICENSE BROTLI-LICENSE
+            FILES+=(BROTLI-LICENSE)
+          else
+            echo "::warning::未找到 ngx_brotli/deps/brotli/LICENSE，归档中跳过"
+          fi
+
+          tar -czf "$GITHUB_WORKSPACE/${DIST_DIR}/${PKG}.tar.gz" "${FILES[@]}"
           echo "PKG=${PKG}" >> "$GITHUB_ENV"
 
       - name: 上传构建产物（Artifact）
