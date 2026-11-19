@@ -95,18 +95,13 @@ jobs:
 
           tar xf "nginx-${NGINX_VERSION}.tar.gz"
           tar xf "openssl-${OPENSSL_VERSION}.tar.gz"
-          tar xf "v${ZLIB_VERSION}.tar.gz"
-          tar xf "pcre2-${PCRE2_VERSION}.tar.gz"
 
-          # GitHub 源码归档解压根目录为 "<repo>-<tag>"（如 pcre2-pcre2-10.49、
-          # zlib-v1.3.1），与 nginx configure 期望的目录名不一致，统一归一化
-          fixdir() {
-            local root
-            root=$(tar tzf "$1" | head -n1 | cut -d/ -f1)
-            if [ "$root" != "$2" ]; then mv "$root" "$2"; fi
-          }
-          fixdir "v${ZLIB_VERSION}.tar.gz" "zlib-${ZLIB_VERSION}"
-          fixdir "pcre2-${PCRE2_VERSION}.tar.gz" "pcre2-${PCRE2_VERSION}"
+          # GitHub 归档解压根目录为 "<repo>-<tag>"（如 pcre2-pcre2-10.49、
+          # zlib-v1.3.1），与 nginx configure 期望的目录名不一致。
+          # 用 --strip-components=1 直接解压到期望目录名，不依赖命名规则。
+          mkdir "zlib-${ZLIB_VERSION}" "pcre2-${PCRE2_VERSION}"
+          tar xzf "v${ZLIB_VERSION}.tar.gz" --strip-components=1 -C "zlib-${ZLIB_VERSION}"
+          tar xzf "pcre2-${PCRE2_VERSION}.tar.gz" --strip-components=1 -C "pcre2-${PCRE2_VERSION}"
 
           # 编译前置校验：任一目录缺失立即失败，避免 make 阶段才报 cd 错误
           test -d "nginx-${NGINX_VERSION}"
