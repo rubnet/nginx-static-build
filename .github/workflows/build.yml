@@ -1,49 +1,201 @@
-name: build
+name: build nginx static
 
-on: [push]
+# 用途：静态编译 nginx 最新版 + ngx_brotli 最新版 + 最新版 OpenSSL
+# 产物：完全静态链接（ldd 显示 not a dynamic executable）的 nginx 二进制，
+#       无任何 .so 依赖，可直接在 CentOS 6（内核 4.18.12-1.el6.elrepo.x86_64）
+#       及更高版本系统上运行。
+# 说明：
+#   1. ubuntu-latest（glibc >= 2.35 已将 nss_files / nss_dns 内置进 libc），
+#      静态二进制的 getpwnam / getaddrinfo 可直接读取 /etc/passwd、/etc/resolv.conf，
+#      目标机无需额外 NSS 模块；静态二进制要求内核 >= 3.2，4.18 满足。
+#   2. 原 1.16.1 的 configure 路径参数全部保留，编译产物可直接替换 /usr/sbin/nginx。
+#   3. 原 -pie 与 -static 互斥，已去掉；其余 cc-opt 保持一致并加严为
+#      -fstack-protector-strong。
+#   4. nginx >= 1.25 且 OpenSSL >= 3.5.1 时自动追加 --with-http_v3_module（HTTP/3）。
+#   5. pcre2 / zlib / openssl / brotli 全部从源码静态编入，不依赖系统库。
+
+on:
+  workflow_dispatch:
+    inputs:
+      nginx_version:
+        description: "nginx 版本；latest = 最新 mainline，也可填具体版本如 1.28.0"
+        required: false
+        default: "latest"
+      openssl_version:
+        description: "OpenSSL 版本；latest = GitHub 最新稳定版，也可填如 3.5.4"
+        required: false
+        default: "latest"
+  schedule:
+    - cron: "0 3 * * 1" # 每周一 UTC 03:00 自动跟随最新版构建
+  push:
+    branches: [main, master]
+    paths: [".github/workflows/build.yml"]
+
+permissions:
+  contents: write # 打 tag 触发时用于创建 Release 并上传产物
+
+env:
+  BUILD_DIR: build
+  DIST_DIR: dist
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-    - uses: actions/checkout@v2
-    - name: build
-      run: |
-        rm  openssl-1.0.2.tar.gz
-        sudo apt-get update  -y
-        sudo apt-get install  wget libxslt1-dev libxml2-dev zlib1g-dev libpcre3-dev libbz2-dev libssl-dev make -y
-        tar -xf nginx-module-vts.tar.gz
-        #wget http://nginx.org/download/nginx-1.22.0.tar.gz
-        tar -xf nginx-1.22.0.tar.gz
-        cd nginx-1.22.0
-        wget https://www.openssl.org/source/old/1.0.1/openssl-1.0.1g.tar.gz
-        tar -xf openssl-1.0.1g.tar.gz
+      - uses: actions/checkout@v4
 
-        ./configure  \
-            --conf-path=/etc/nginx/nginx.conf  --prefix=/usr/share/nginx \
-            --error-log-path=/var/log/nginx/error.log --http-log-path=/var/log/nginx/access.log \
-            --pid-path=/run/nginx.pid \
-            --with-cc-opt="-static -static-libgcc" \
-            --with-ld-opt="-static" --with-cpu-opt=generic --with-pcre \
-            --with-mail --with-ipv6 --with-poll_module --with-select_module \
-            --with-select_module --with-poll_module \
-            --with-http_ssl_module --with-http_realip_module \
+      - name: 解析版本号（默认自动取最新）
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # nginx.org 下载页：第一条为 Mainline，第二条为 Stable
+          nginx_mainline=$(curl -fsSL https://nginx.org/en/download.html \
+            | grep -oE 'nginx-[0-9]+\.[0-9]+\.[0-9]+' | sed -n '1p' | cut -d- -f2)
+          echo "nginx 最新 mainline: $nginx_mainline"
+
+          NGINX_VERSION="${{ inputs.nginx_version || 'latest' }}"
+          [ "$NGINX_VERSION" = "latest" ] && NGINX_VERSION="$nginx_mainline"
+
+          OPENSSL_VERSION="${{ inputs.openssl_version || 'latest' }}"
+          if [ "$OPENSSL_VERSION" = "latest" ]; then
+            # releases/latest 只返回正式稳定版，不含 alpha/beta/rc
+            OPENSSL_VERSION=$(gh api repos/openssl/openssl/releases/latest \
+              --jq .tag_name | sed 's/^openssl-//')
+          fi
+
+          ZLIB_VERSION=$(gh api repos/madler/zlib/releases/latest \
+            --jq .tag_name | sed 's/^v//')
+          PCRE2_VERSION=$(gh api repos/PCRE2Project/pcre2/releases/latest \
+            --jq .tag_name | sed 's/^pcre2-//')
+
+          echo "使用版本: nginx=$NGINX_VERSION openssl=$OPENSSL_VERSION zlib=$ZLIB_VERSION pcre2=$PCRE2_VERSION"
+          {
+            echo "NGINX_VERSION=$NGINX_VERSION"
+            echo "OPENSSL_VERSION=$OPENSSL_VERSION"
+            echo "ZLIB_VERSION=$ZLIB_VERSION"
+            echo "PCRE2_VERSION=$PCRE2_VERSION"
+          } >> "$GITHUB_ENV"
+
+      - name: 下载源码
+        run: |
+          set -euo pipefail
+          mkdir -p "$BUILD_DIR" "$DIST_DIR"
+          cd "$BUILD_DIR"
+
+          curl -fLO "https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz"
+          curl -fLO "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz"
+          curl -fLO "https://github.com/madler/zlib/archive/refs/tags/v${ZLIB_VERSION}.tar.gz"
+          curl -fLO "https://github.com/PCRE2Project/pcre2/archive/refs/tags/pcre2-${PCRE2_VERSION}.tar.gz"
+
+          # ngx_brotli 最新版（含 brotli 子模块，随 nginx 静态编入）
+          git clone --depth 1 --recursive https://github.com/google/ngx_brotli.git
+
+          tar xf "nginx-${NGINX_VERSION}.tar.gz"
+          tar xf "openssl-${OPENSSL_VERSION}.tar.gz"
+          tar xf "v${ZLIB_VERSION}.tar.gz"
+          tar xf "pcre2-${PCRE2_VERSION}.tar.gz"
+
+      - name: 编译（静态链接）
+        run: |
+          set -euo pipefail
+          cd "$BUILD_DIR/nginx-${NGINX_VERSION}"
+
+          # nginx >= 1.25 且 OpenSSL >= 3.5.1 时启用 HTTP/3（原生 QUIC）
+          V3=""
+          if [ "$(printf '%s\n' 1.25.0 "${NGINX_VERSION}" | sort -V | head -n1)" = "1.25.0" ] \
+             && [ "$(printf '%s\n' 3.5.1 "${OPENSSL_VERSION}" | sort -V | head -n1)" = "3.5.1" ]; then
+            V3="--with-http_v3_module"
+          fi
+
+          ./configure \
+            --prefix=/etc/nginx \
+            --sbin-path=/usr/sbin/nginx \
+            --modules-path=/usr/lib64/nginx/modules \
+            --conf-path=/etc/nginx/nginx.conf \
+            --error-log-path=/var/log/nginx/error.log \
+            --http-log-path=/var/log/nginx/access.log \
+            --pid-path=/var/run/nginx.pid \
+            --lock-path=/var/run/nginx.lock \
+            --http-client-body-temp-path=/var/cache/nginx/client_temp \
+            --http-proxy-temp-path=/var/cache/nginx/proxy_temp \
+            --http-fastcgi-temp-path=/var/cache/nginx/fastcgi_temp \
+            --http-uwsgi-temp-path=/var/cache/nginx/uwsgi_temp \
+            --http-scgi-temp-path=/var/cache/nginx/scgi_temp \
+            --user=nginx --group=nginx \
+            --with-compat \
+            --with-file-aio \
+            --with-threads \
+            --with-http_addition_module \
+            --with-http_auth_request_module \
+            --with-http_dav_module \
+            --with-http_flv_module \
+            --with-http_gunzip_module \
+            --with-http_gzip_static_module \
+            --with-http_mp4_module \
+            --with-http_random_index_module \
+            --with-http_realip_module \
+            --with-http_secure_link_module \
+            --with-http_slice_module \
+            --with-http_ssl_module \
+            --with-http_stub_status_module \
+            --with-http_sub_module \
             --with-http_v2_module \
-            --with-http_addition_module --with-http_sub_module --with-http_dav_module \
-            --with-http_flv_module --with-http_mp4_module --with-http_gunzip_module \
-            --with-http_gzip_static_module --with-http_auth_request_module \
-            --with-http_random_index_module --with-http_secure_link_module \
-            --with-http_degradation_module --with-http_stub_status_module \
-            --with-mail --with-mail_ssl_module --with-openssl=./openssl-1.0.1g \
-            --add-module=../nginx-module-vts-master && make -j1 && cp objs/nginx /tmp/nginx
-        
-    - name: Upload binaries to release
-      uses: svenstaro/upload-release-action@v2
-      with:
-        # secrets.GITHUB_TOKEN 是内置变量
-        repo_token: ${{ secrets.GITHUB_TOKEN }}
-        file: /tmp/nginx
-        asset_name: mything
-        tag: ${{ github.ref }}
-        overwrite: true
-        file_glob: true
+            --with-mail \
+            --with-mail_ssl_module \
+            --with-stream \
+            --with-stream_realip_module \
+            --with-stream_ssl_module \
+            --with-stream_ssl_preread_module \
+            ${V3} \
+            --with-pcre="../pcre2-${PCRE2_VERSION}" \
+            --with-pcre-jit \
+            --with-zlib="../zlib-${ZLIB_VERSION}" \
+            --with-openssl="../openssl-${OPENSSL_VERSION}" \
+            --add-module="../ngx_brotli" \
+            --with-cc-opt='-O2 -g -pipe -Wall -Wp,-D_FORTIFY_SOURCE=2 -fexceptions -fstack-protector-strong --param=ssp-buffer-size=4 -m64 -mtune=generic -fPIC' \
+            --with-ld-opt='-static -Wl,-z,relro -Wl,-z,now'
+
+          make -j"$(nproc)"
+
+      - name: 校验静态链接
+        run: |
+          set -euo pipefail
+          cd "$BUILD_DIR/nginx-${NGINX_VERSION}"
+          file objs/nginx
+          # 硬校验：必须为静态二进制，否则构建失败
+          file objs/nginx | grep -q 'statically linked'
+          ldd objs/nginx || true
+          ./objs/nginx -V 2>&1 | tee BUILD-INFO.txt
+
+      - name: 打包
+        run: |
+          set -euo pipefail
+          cd "$BUILD_DIR"
+          cp "nginx-${NGINX_VERSION}/objs/nginx" nginx
+          cp "nginx-${NGINX_VERSION}/BUILD-INFO.txt" .
+          cp ngx_brotli/brotli/LICENSE BROTLI-LICENSE 2>/dev/null || true
+
+          PKG="nginx-${NGINX_VERSION}-openssl-${OPENSSL_VERSION}-brotli-static-x86_64"
+          tar -czf "$GITHUB_WORKSPACE/${DIST_DIR}/${PKG}.tar.gz" \
+            nginx BUILD-INFO.txt BROTLI-LICENSE
+          echo "PKG=${PKG}" >> "$GITHUB_ENV"
+
+      - name: 上传构建产物（Artifact）
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PKG }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+      - name: 上传到 Release（仅 tag 触发时）
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            dist/*.tar.gz
