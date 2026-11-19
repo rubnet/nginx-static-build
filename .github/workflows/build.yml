@@ -103,13 +103,30 @@ jobs:
           tar xzf "v${ZLIB_VERSION}.tar.gz" --strip-components=1 -C "zlib-${ZLIB_VERSION}"
           tar xzf "pcre2-${PCRE2_VERSION}.tar.gz" --strip-components=1 -C "pcre2-${PCRE2_VERSION}"
 
-          # 编译前置校验：任一目录缺失立即失败，避免 make 阶段才报 cd 错误
-          test -d "nginx-${NGINX_VERSION}"
-          test -d "openssl-${OPENSSL_VERSION}"
-          test -d "zlib-${ZLIB_VERSION}"
-          test -d "pcre2-${PCRE2_VERSION}"
-          test -f "ngx_brotli/config"
-          test -d "ngx_brotli/brotli"
+          # 编译前置校验：任一目录缺失立即失败并输出错误信息和目录列表，
+          # 避免拖到 make 阶段才报模糊的 cd 错误
+          check_dir() {
+            if [ ! -d "$1" ]; then
+              echo "::error::目录缺失: $1 （configure/make 将无法找到该源码目录）"
+              echo "当前 $BUILD_DIR 目录内容："
+              ls -la
+              exit 1
+            fi
+          }
+          check_file() {
+            if [ ! -f "$1" ]; then
+              echo "::error::文件缺失: $1"
+              echo "当前 $BUILD_DIR 目录内容："
+              ls -la
+              exit 1
+            fi
+          }
+          check_dir "nginx-${NGINX_VERSION}"
+          check_dir "openssl-${OPENSSL_VERSION}"
+          check_dir "zlib-${ZLIB_VERSION}"
+          check_dir "pcre2-${PCRE2_VERSION}"
+          check_file "ngx_brotli/config"
+          check_dir "ngx_brotli/brotli"
 
       - name: 编译（静态链接）
         run: |
