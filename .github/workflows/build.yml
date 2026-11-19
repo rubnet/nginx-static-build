@@ -126,7 +126,7 @@ jobs:
           check_dir "zlib-${ZLIB_VERSION}"
           check_dir "pcre2-${PCRE2_VERSION}"
           check_file "ngx_brotli/config"
-          check_dir "ngx_brotli/brotli"
+          check_dir "ngx_brotli/deps/brotli"
 
       - name: 编译（静态链接）
         run: |
