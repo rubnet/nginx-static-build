@@ -103,6 +103,23 @@ jobs:
           tar xzf "v${ZLIB_VERSION}.tar.gz" --strip-components=1 -C "zlib-${ZLIB_VERSION}"
           tar xzf "pcre2-${PCRE2_VERSION}.tar.gz" --strip-components=1 -C "pcre2-${PCRE2_VERSION}"
 
+          # PCRE2 的 GitHub 自动归档不含 deps/sljit 子模块，而 JIT 编译需要
+          # src/pcre2_jit_compile.c 依赖 ../deps/sljit/sljit_src/sljitLir.c。
+          # 按 PCRE2 该 tag 锁定的子模块 commit 精确拉取 sljit：
+          SLJIT_SHA=$(curl -fsSL \
+            "https://api.github.com/repos/PCRE2Project/pcre2/contents/deps/sljit?ref=pcre2-${PCRE2_VERSION}" \
+            | jq -r '.sha // empty')
+          if [ -n "$SLJIT_SHA" ]; then
+            echo "pcre2-${PCRE2_VERSION} 锁定的 sljit commit: ${SLJIT_SHA}"
+            git clone --quiet https://github.com/zherczeg/sljit.git \
+              "pcre2-${PCRE2_VERSION}/deps/sljit"
+            git -C "pcre2-${PCRE2_VERSION}/deps/sljit" checkout --quiet "${SLJIT_SHA}"
+          else
+            echo "::warning::未能从 API 获取 sljit 锁定 commit，使用 sljit 默认分支"
+            git clone --quiet --depth 1 https://github.com/zherczeg/sljit.git \
+              "pcre2-${PCRE2_VERSION}/deps/sljit"
+          fi
+
           # 编译前置校验：任一目录缺失立即失败并输出错误信息和目录列表，
           # 避免拖到 make 阶段才报模糊的 cd 错误
           check_dir() {
@@ -127,6 +144,7 @@ jobs:
           check_dir "pcre2-${PCRE2_VERSION}"
           check_file "ngx_brotli/config"
           check_dir "ngx_brotli/deps/brotli"
+          check_file "pcre2-${PCRE2_VERSION}/deps/sljit/sljit_src/sljitLir.c"
 
       - name: 编译（静态链接）
         run: |
