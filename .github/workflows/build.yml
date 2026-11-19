@@ -13,6 +13,8 @@ name: build nginx static
 #      -fstack-protector-strong。
 #   4. nginx >= 1.25 且 OpenSSL >= 3.5.1 时自动追加 --with-http_v3_module（HTTP/3）。
 #   5. pcre2 / zlib / openssl / brotli 全部从源码静态编入，不依赖系统库。
+#   6. ngx_brotli 自身不编译 brotli，只链接 deps/brotli/out 下预生成的
+#      libbrotlienc.a / libbrotlicommon.a，故 configure 前需先用 cmake 生成。
 
 on:
   workflow_dispatch:
@@ -90,7 +92,7 @@ jobs:
           curl -fLO "https://github.com/madler/zlib/archive/refs/tags/v${ZLIB_VERSION}.tar.gz"
           curl -fLO "https://github.com/PCRE2Project/pcre2/archive/refs/tags/pcre2-${PCRE2_VERSION}.tar.gz"
 
-          # ngx_brotli 最新版（含 brotli 子模块，随 nginx 静态编入）
+          # ngx_brotli 最新版（含 brotli 子模块）
           git clone --depth 1 --recursive https://github.com/google/ngx_brotli.git
 
           tar xf "nginx-${NGINX_VERSION}.tar.gz"
@@ -144,7 +146,29 @@ jobs:
           check_dir "pcre2-${PCRE2_VERSION}"
           check_file "ngx_brotli/config"
           check_dir "ngx_brotli/deps/brotli"
+          check_file "ngx_brotli/deps/brotli/CMakeLists.txt"
           check_file "pcre2-${PCRE2_VERSION}/deps/sljit/sljit_src/sljitLir.c"
+
+      - name: 构建 brotli 静态库
+        # ngx_brotli/filter/config 写死了 -L deps/brotli/out -lbrotlienc -lbrotlicommon，
+        # 它不会自行编译 brotli 源码，必须先在此生成 .a 文件，否则 make 阶段报
+        # "cannot find -lbrotlienc"。
+        run: |
+          set -euo pipefail
+          cd "$BUILD_DIR/ngx_brotli/deps/brotli"
+          mkdir -p out && cd out
+
+          # 不加 -march=native / -mtune=native，保证产物可跨 CPU 运行。
+          cmake -DCMAKE_BUILD_TYPE=Release \
+                -DBUILD_SHARED_LIBS=OFF \
+                -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+                -DCMAKE_INSTALL_PREFIX=./installed \
+                ..
+          cmake --build . --config Release --target brotlienc
+
+          # brotlienc 会连带构建其依赖的 brotlicommon，两个 .a 都落在 out/。
+          # ls 在文件缺失时非零退出，配合 set -e 即完成校验。
+          ls -l libbrotlienc.a libbrotlicommon.a
 
       - name: 编译（静态链接）
         run: |
