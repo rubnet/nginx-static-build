@@ -203,7 +203,7 @@ jobs:
             --with-zlib="../zlib-${ZLIB_VERSION}" \
             --with-openssl="../openssl-${OPENSSL_VERSION}" \
             --add-module="../ngx_brotli" \
-            --with-cc-opt='-O2 -g -pipe -Wall -Wp,-D_FORTIFY_SOURCE=2 -fexceptions -fstack-protector-strong --param=ssp-buffer-size=4 -m64 -mtune=generic -fPIC' \
+            --with-cc-opt='-O2 -g -pipe -Wall -Wp, -fexceptions -fstack-protector-strong --param=ssp-buffer-size=4 -m64 -mtune=generic -fPIC' \
             --with-ld-opt='-static -Wl,-z,relro -Wl,-z,now'
 
           make -j"$(nproc)"
